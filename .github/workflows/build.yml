@@ -1,0 +1,38 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: 17
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Generate Gradle Wrapper
+        run: gradle wrapper --gradle-version 8.5
+
+      - name: Build Release APK
+        run: ./gradlew assembleRelease
+        env:
+          CI: true
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: afavip-unlock-apk
+          path: app/build/outputs/apk/release/*.apk
+          retention-days: 7
