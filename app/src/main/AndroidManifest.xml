@@ -4,10 +4,8 @@
     <!-- LSPosed 模块标识 -->
     <application
         android:allowBackup="false"
-        android:icon="@mipmap/ic_launcher"
         android:label="阿法算牌VIP解锁"
-        android:supportsRtl="true"
-        android:theme="@style/Theme.AppCompat.NoActionBar">
+        android:supportsRtl="true">
 
         <!-- Xposed模块元数据 (兼容LSPosed / EdXposed / Xposed) -->
         <meta-data
@@ -15,7 +13,7 @@
             android:value="true" />
         <meta-data
             android:name="xposeddescription"
-            android:value="注入阿法算牌com.example.af_flutter_ceshi，永久解锁VIP功能" />
+            android:value="注入阿法算牌 com.example.af_flutter_ceshi，永久解锁VIP功能" />
         <meta-data
             android:name="xposedminversion"
             android:value="82" />
