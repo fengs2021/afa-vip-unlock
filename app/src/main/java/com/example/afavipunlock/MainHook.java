@@ -166,16 +166,20 @@ public class MainHook implements IXposedHookLoadPackage {
     }
     private static byte[] buildIntValue(int v) {
         java.io.ByteArrayOutputStream o = new java.io.ByteArrayOutputStream();
-        o.write(0x18); // Value.integer tag
-        writeVarint(o, v);
+        try {
+            o.write(0x18); // Value.integer tag
+            writeVarint(o, v);
+        } catch (java.io.IOException ignored) {}
         return o.toByteArray();
     }
     private static byte[] buildStringValue(String s) {
         byte[] b = s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
         java.io.ByteArrayOutputStream o = new java.io.ByteArrayOutputStream();
-        o.write(0x2A); // Value.string tag
-        writeVarint(o, b.length);
-        try { o.write(b); } catch (Exception ignored) {}
+        try {
+            o.write(0x2A); // Value.string tag
+            writeVarint(o, b.length);
+            o.write(b);
+        } catch (java.io.IOException ignored) {}
         return o.toByteArray();
     }
     private static void writeMapEntry(java.io.ByteArrayOutputStream out, String key, byte[] valueMsg) throws Exception {
