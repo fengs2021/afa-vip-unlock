@@ -27,8 +27,31 @@ jobs:
 
       - name: Build Release APK
         run: ./gradlew assembleRelease
-        env:
-          CI: true
+
+      - name: Sign APK (v1+v2+v3)
+        run: |
+          # 生成 debug keystore
+          keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey \
+            -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+          # 找到 apksigner
+          APKSIGNER=$(ls $ANDROID_HOME/build-tools/*/apksigner | head -1)
+          echo "Using apksigner: $APKSIGNER"
+
+          # 签名：同时启用 v1 + v2 + v3
+          $APKSIGNER sign \
+            --ks debug.keystore \
+            --ks-pass pass:android \
+            --ks-key-alias androiddebugkey \
+            --key-pass pass:android \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            app/build/outputs/apk/release/*.apk
+
+          # 验证签名
+          $APKSIGNER verify --verbose app/build/outputs/apk/release/*.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
