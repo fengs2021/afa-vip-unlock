@@ -162,7 +162,7 @@ public class MainHook implements IXposedHookLoadPackage {
 
     // ===== protobuf 字节构造 =====
     private static byte[] buildBoolValue(boolean b) {
-        return new byte[]{0x08, b ? 0x01 : 0x00};
+        return new byte[]{(byte) 0x08, b ? (byte) 0x01 : (byte) 0x00};
     }
     private static byte[] buildIntValue(int v) {
         java.io.ByteArrayOutputStream o = new java.io.ByteArrayOutputStream();
