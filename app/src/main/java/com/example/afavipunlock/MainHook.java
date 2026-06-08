@@ -1,217 +1,200 @@
 package com.example.afavipunlock;
 
+import android.app.Application;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.util.Log;
 
 import java.io.File;
 import java.io.FileOutputStream;
-import java.io.IOException;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * 阿法算牌 VIP 永久解锁 - LSPosed / Xposed 模块
+ * 阿法算牌 VIP 永久解锁 - LSPatch embedded 模块
  *
- * 目标包名：com.example.af_flutter_ceshi
- * 策略：在app启动后，立即覆写SharedPreferences文件，写入所有VIP标志。
- *      之后app从SharedPreferences读到的就是已开通VIP状态。
+ * 目标包名：com.example.af_flutter_ceshi (Flutter + 梆梆加固)
+ * 模式：LSPatch 嵌入式（无需 root，无 LSPosed 框架在 /proc/self/maps）
  *
  * 工作原理：
- *   1. 等Flutter引擎初始化完（MainActivity.onCreate之后），
- *      在目标app进程里直接写SharedPreferences文件。
- *   2. 复盖所有可能的VIP key: is_vip, vip, member_type, is_paid 等。
- *   3. 写完不再Hook SharedPreferences方法（避免影响系统服务，触发ANR）。
+ *   1. 不 hook Application.attachBaseContext（梆梆壳拦截，全局 hook 会卡开屏）
+ *   2. 只 hook com.example.af_flutter_ceshi.MainActivity.onCreate
+ *      - LSPosed 引擎会在 MainActivity 类被 ClassLoader 加载时延迟 hook
+ *      - 此时梆梆已经解密完真实 dex，MainActivity 是真实类
+ *   3. 第一次 onCreate 回调时，写 DataStore preferences_pb + SharedPreferences XML
+ *   4. 写完即返回，不阻塞 UI
  */
 public class MainHook implements IXposedHookLoadPackage {
 
-    private static final String TAG = "AFA_VIP_UNLOCK";
+    private static final String TAG = "AFA_VIP";
     private static final String TARGET_PACKAGE = "com.example.af_flutter_ceshi";
+    private static final String MAIN_ACTIVITY = "com.example.af_flutter_ceshi.MainActivity";
 
-    // VIP写入目标
-    private static final String[] PREF_FILES = {
-            "FlutterSharedPreferences",  // Flutter官方默认SharedPreferences名
-            "flutter_preferences",      // 备用
-            "af_preferences",           // 项目自定义
-            "afa_preferences",          // 项目自定义
-            "user_preferences",         // 通用
-    };
+    private static volatile boolean hasInjected = false;
 
-    // 写入的VIP字段
-    private static final Map<String, Object> VIP_VALUES = new HashMap<>();
+    // Flutter shared_preferences 在 Android 端实际写 androidx.datastore，
+    // 文件路径是 filesDir/datastore/shared_preferences.preferences_pb
+    // 同时为了兼容老式插件，我们也写 shared_prefs/FlutterSharedPreferences.xml
+
+    // VIP key -> value
+    private static final Map<String, Object> VIP_BOOL = new LinkedHashMap<>();
+    private static final Map<String, String> VIP_STR = new LinkedHashMap<>();
+    private static final Map<String, Integer> VIP_INT = new LinkedHashMap<>();
     static {
-        // Boolean类
-        VIP_VALUES.put("is_vip", true);
-        VIP_VALUES.put("isVip", true);
-        VIP_VALUES.put("vip", true);
-        VIP_VALUES.put("vip_status", true);
-        VIP_VALUES.put("vipStatus", true);
-        VIP_VALUES.put("is_member", true);
-        VIP_VALUES.put("isMember", true);
-        VIP_VALUES.put("is_premium", true);
-        VIP_VALUES.put("isPremium", true);
-        VIP_VALUES.put("premium", true);
-        VIP_VALUES.put("has_subscription", true);
-        VIP_VALUES.put("hasSubscription", true);
-        VIP_VALUES.put("paid", true);
-        VIP_VALUES.put("is_paid", true);
-        VIP_VALUES.put("isLogin", true);
-        VIP_VALUES.put("is_login", true);
-        VIP_VALUES.put("login_status", true);
-        VIP_VALUES.put("loginStatus", true);
-
-        // String类
-        VIP_VALUES.put("vip_type", "permanent");
-        VIP_VALUES.put("vipType", "permanent");
-        VIP_VALUES.put("vip_level", "ultimate");
-        VIP_VALUES.put("vipLevel", "ultimate");
-        VIP_VALUES.put("member_type", "vip");
-        VIP_VALUES.put("memberType", "vip");
-        VIP_VALUES.put("user_level", "vip");
-        VIP_VALUES.put("userLevel", "vip");
-        VIP_VALUES.put("subscription_type", "permanent");
-        VIP_VALUES.put("subscriptionType", "permanent");
-
-        // Int类
-        VIP_VALUES.put("vip_expire", Integer.MAX_VALUE);
-        VIP_VALUES.put("vipExpire", Integer.MAX_VALUE);
-        VIP_VALUES.put("expire_time", Integer.MAX_VALUE);
-        VIP_VALUES.put("expireTime", Integer.MAX_VALUE);
-        VIP_VALUES.put("login_type", 1);
-        VIP_VALUES.put("loginType", 1);
+        VIP_BOOL.put("flutter.is_vip", true);
+        VIP_BOOL.put("flutter.vip", true);
+        VIP_BOOL.put("flutter.is_paid", true);
+        VIP_BOOL.put("flutter.is_premium", true);
+        VIP_BOOL.put("flutter.vip_status", true);
+        VIP_STR.put("flutter.vip_type", "permanent");
+        VIP_STR.put("flutter.user_level", "ultimate");
+        VIP_STR.put("flutter.member_type", "vip");
+        VIP_INT.put("flutter.expire", Integer.MAX_VALUE);
+        VIP_INT.put("flutter.vip_expire", Integer.MAX_VALUE);
     }
-
-    private static Context appContext = null;
-    private static boolean hasInjected = false;
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
-        if (!lpparam.packageName.equals(TARGET_PACKAGE)) {
+        if (!TARGET_PACKAGE.equals(lpparam.packageName)) {
             return;
         }
 
-        Log.i(TAG, "========================================");
-        Log.i(TAG, "阿法算牌VIP解锁模块已加载");
-        Log.i(TAG, "目标包名: " + lpparam.packageName);
-        Log.i(TAG, "========================================");
-
-        // Hook Application.attachBaseContext - app最早期的生命周期，能拿到app的dataDir
-        XposedHelpers.findAndHookMethod(
-                "android.app.Application",
-                lpparam.classLoader,
-                "attachBaseContext",
-                Context.class,
-                new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        try {
-                            appContext = (Context) param.args[0];
-                            Log.i(TAG, "已捕获Context: " + appContext.getPackageName());
-                            injectVip();
-                        } catch (Throwable t) {
-                            Log.e(TAG, "attachBaseContext 注入失败: " + t.getMessage(), t);
-                        }
-                    }
-                }
-        );
-
-        // Hook MainActivity.onCreate - 避免Flutter界面显示时还没注入
-        // 通过反射查找所有的 Activity onCreate
-        // 因为包名是 com.example.af_flutter_ceshi，MainActivity 一般是 MainActivity
+        // Hook MainActivity.onCreate - 真实 MainActivity 类在梆梆解密后才会被加载
+        // LSPosed 引擎会延迟到类出现时再 hook
         try {
             XposedHelpers.findAndHookMethod(
-                    "android.app.Activity",
+                    MAIN_ACTIVITY,
                     lpparam.classLoader,
                     "onCreate",
                     android.os.Bundle.class,
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
+                            if (hasInjected) return;
                             try {
-                                // 首次进入任意Activity时注入
-                                if (!hasInjected && appContext != null) {
-                                    injectVip();
-                                }
+                                Object activity = param.thisObject;
+                                if (activity == null) return;
+                                Context ctx = ((android.app.Activity) activity).getApplicationContext();
+                                if (ctx == null) return;
+                                hasInjected = true;
+                                injectAll(ctx);
                             } catch (Throwable t) {
-                                Log.e(TAG, "onCreate 注入失败: " + t.getMessage());
+                                // 不打印日志，避免 IO
                             }
                         }
                     }
             );
-            Log.i(TAG, "Activity.onCreate Hook 加载完成");
         } catch (Throwable t) {
-            Log.w(TAG, "Activity.onCreate Hook 加载失败: " + t.getMessage());
+            // 类尚未加载，LSPosed 引擎会延迟尝试
+        }
+    }
+
+    private static void injectAll(Context ctx) {
+        try {
+            writeDataStoreProto(ctx);
+        } catch (Throwable ignored) {}
+        try {
+            writeSharedPreferencesXml(ctx);
+        } catch (Throwable ignored) {}
+    }
+
+    /**
+     * 写 androidx.datastore 的 protobuf 文件
+     * 路径：filesDir/datastore/shared_preferences.preferences_pb
+     */
+    private static void writeDataStoreProto(Context ctx) throws Exception {
+        File filesDir = ctx.getFilesDir();
+        File dsDir = new File(filesDir, "datastore");
+        // 不调 mkdirs，DataStore 自己会创建；但首次写入时还不存在会失败
+        if (!dsDir.exists()) {
+            // DataStore 会自己创建，但只在该文件被请求时；我们提前写不创建会导致失败
+            // 让 Flutter 端第一次读时自动创建空 pb，之后我们再写
+            // 这里不主动创建目录
+        }
+        File dsFile = new File(dsDir, "shared_preferences.preferences_pb");
+        if (!dsFile.exists()) {
+            // 第一次运行，等 Flutter 端自己创建
+            return;
+        }
+
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        for (Map.Entry<String, Object> e : VIP_BOOL.entrySet()) {
+            writeMapEntry(out, e.getKey(), buildBoolValue((Boolean) e.getValue()));
+        }
+        for (Map.Entry<String, String> e : VIP_STR.entrySet()) {
+            writeMapEntry(out, e.getKey(), buildStringValue(e.getValue()));
+        }
+        for (Map.Entry<String, Integer> e : VIP_INT.entrySet()) {
+            writeMapEntry(out, e.getKey(), buildIntValue(e.getValue()));
+        }
+
+        FileOutputStream fos = new FileOutputStream(dsFile);
+        try {
+            fos.write(out.toByteArray());
+        } finally {
+            fos.close();
         }
     }
 
     /**
-     * 注入VIP状态
-     * 直接写SharedPreferences文件，避开方法Hook可能引起的ANR
+     * 写老式 SharedPreferences XML 兜底
      */
-    private static void injectVip() {
-        if (appContext == null) {
-            Log.e(TAG, "appContext为空，无法注入");
-            return;
+    private static void writeSharedPreferencesXml(Context ctx) {
+        SharedPreferences sp = ctx.getSharedPreferences(
+                "FlutterSharedPreferences", Context.MODE_PRIVATE);
+        SharedPreferences.Editor ed = sp.edit();
+        for (Map.Entry<String, Object> e : VIP_BOOL.entrySet()) {
+            ed.putBoolean(e.getKey(), (Boolean) e.getValue());
         }
-        if (hasInjected) {
-            return;
+        for (Map.Entry<String, String> e : VIP_STR.entrySet()) {
+            ed.putString(e.getKey(), e.getValue());
         }
-        hasInjected = true;
-
-        try {
-            // 关键：使用MODE_PRIVATE重新打开每个已知的SharedPreferences文件
-            // 这会强制加载（如果存在）并创建（如果不存在）
-            for (String prefFileName : PREF_FILES) {
-                try {
-                    SharedPreferences sp = appContext.getSharedPreferences(
-                            prefFileName, Context.MODE_PRIVATE);
-                    SharedPreferences.Editor editor = sp.edit();
-
-                    // 先读取一次（触发实际加载）
-                    Map<String, ?> existing = sp.getAll();
-                    Log.i(TAG, "[" + prefFileName + "] 现有key数量: " + existing.size());
-                    if (existing.size() > 0) {
-                        Log.i(TAG, "[" + prefFileName + "] 现有keys: " + existing.keySet());
-                    }
-
-                    // 写入所有VIP字段
-                    for (Map.Entry<String, Object> entry : VIP_VALUES.entrySet()) {
-                        String key = entry.getKey();
-                        Object value = entry.getValue();
-                        if (value instanceof Boolean) {
-                            editor.putBoolean(key, (Boolean) value);
-                        } else if (value instanceof Integer) {
-                            editor.putInt(key, (Integer) value);
-                        } else if (value instanceof Long) {
-                            editor.putLong(key, (Long) value);
-                        } else if (value instanceof Float) {
-                            editor.putFloat(key, (Float) value);
-                        } else if (value instanceof String) {
-                            editor.putString(key, (String) value);
-                        }
-                    }
-
-                    // 提交
-                    boolean ok = editor.commit();
-                    Log.i(TAG, "[" + prefFileName + "] VIP写入: " + (ok ? "成功 ✓" : "失败 ✗"));
-
-                } catch (Throwable t) {
-                    Log.w(TAG, "[" + prefFileName + "] 注入出错: " + t.getMessage());
-                }
-            }
-
-            Log.i(TAG, "========================================");
-            Log.i(TAG, "VIP状态注入完成！请打开APP测试");
-            Log.i(TAG, "========================================");
-
-        } catch (Throwable t) {
-            Log.e(TAG, "注入过程异常: " + t.getMessage(), t);
+        for (Map.Entry<String, Integer> e : VIP_INT.entrySet()) {
+            ed.putInt(e.getKey(), e.getValue());
         }
+        ed.apply();
+    }
+
+    // ===== protobuf 字节构造 =====
+    private static byte[] buildBoolValue(boolean b) {
+        return new byte[]{0x08, b ? 0x01 : 0x00};
+    }
+    private static byte[] buildIntValue(int v) {
+        java.io.ByteArrayOutputStream o = new java.io.ByteArrayOutputStream();
+        o.write(0x18); // Value.integer tag
+        writeVarint(o, v);
+        return o.toByteArray();
+    }
+    private static byte[] buildStringValue(String s) {
+        byte[] b = s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        java.io.ByteArrayOutputStream o = new java.io.ByteArrayOutputStream();
+        o.write(0x2A); // Value.string tag
+        writeVarint(o, b.length);
+        try { o.write(b); } catch (Exception ignored) {}
+        return o.toByteArray();
+    }
+    private static void writeMapEntry(java.io.ByteArrayOutputStream out, String key, byte[] valueMsg) throws Exception {
+        byte[] kb = key.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        int entryLen = 2 + kb.length + 2 + valueMsg.length;
+        out.write(0x0A); // map entry tag
+        writeVarint(out, entryLen);
+        out.write(0x0A); // key tag
+        writeVarint(out, kb.length);
+        out.write(kb);
+        out.write(0x12); // value tag
+        writeVarint(out, valueMsg.length);
+        out.write(valueMsg);
+    }
+    private static void writeVarint(java.io.OutputStream out, int v) throws java.io.IOException {
+        while ((v & ~0x7F) != 0) {
+            out.write((v & 0x7F) | 0x80);
+            v >>>= 7;
+        }
+        out.write(v & 0x7F);
     }
 }
