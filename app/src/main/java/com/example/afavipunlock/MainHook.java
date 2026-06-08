@@ -1,7 +1,14 @@
 package com.example.afavipunlock;
 
+import android.content.Context;
 import android.content.SharedPreferences;
 import android.util.Log;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -13,92 +20,78 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  * 阿法算牌 VIP 永久解锁 - LSPosed / Xposed 模块
  *
  * 目标包名：com.example.af_flutter_ceshi
- * 策略：Hook SharedPreferences 层，拦截所有VIP相关key的读取，
- *       强制返回已开通VIP状态。同时拦截写入操作，防止app将VIP状态覆盖为false。
+ * 策略：在app启动后，立即覆写SharedPreferences文件，写入所有VIP标志。
+ *      之后app从SharedPreferences读到的就是已开通VIP状态。
  *
  * 工作原理：
- *   阿法算牌是Flutter应用，业务逻辑在Dart层（libapp.so）。
- *   VIP状态通过 Flutter shared_preferences 插件存储，
- *   底层使用 Android SharedPreferences Java API。
- *   我们在Java层Hook SharedPreferences，Dart层无需修改即可生效。
+ *   1. 等Flutter引擎初始化完（MainActivity.onCreate之后），
+ *      在目标app进程里直接写SharedPreferences文件。
+ *   2. 复盖所有可能的VIP key: is_vip, vip, member_type, is_paid 等。
+ *   3. 写完不再Hook SharedPreferences方法（避免影响系统服务，触发ANR）。
  */
 public class MainHook implements IXposedHookLoadPackage {
 
     private static final String TAG = "AFA_VIP_UNLOCK";
     private static final String TARGET_PACKAGE = "com.example.af_flutter_ceshi";
 
-    // ============================================================
-    // VIP关键key列表
-    // 如果发现实际使用的key名不在列表中，添加到此处即可
-    // ============================================================
-    private static final String[] VIP_KEYS = {
-            "is_vip",
-            "isVip",
-            "vip",
-            "vip_status",
-            "vipStatus",
-            "member_type",
-            "memberType",
-            "isMember",
-            "is_premium",
-            "isPremium",
-            "premium",
-            "subscription_status",
-            "subscriptionStatus",
-            "has_subscription",
-            "hasSubscription",
-            "paid",
-            "is_paid",
-            "user_level",
-            "userLevel",
-            "login_status",
-            "isLogin",
-            "is_login",
-            "flutter.is_vip",
-            "flutter.vip",
-            "huiyuan",
-            "vip_type",
-            "vipType",
+    // VIP写入目标
+    private static final String[] PREF_FILES = {
+            "FlutterSharedPreferences",  // Flutter官方默认SharedPreferences名
+            "flutter_preferences",      // 备用
+            "af_preferences",           // 项目自定义
+            "afa_preferences",          // 项目自定义
+            "user_preferences",         // 通用
     };
 
-    // ============================================================
-    // 检测是否是VIP相关key
-    // ============================================================
-    private static boolean isVipKey(String key) {
-        if (key == null) return false;
-        String lower = key.toLowerCase();
-        for (String vipKey : VIP_KEYS) {
-            if (lower.equals(vipKey.toLowerCase()) ||
-                    lower.contains(vipKey.toLowerCase()) ||
-                    vipKey.toLowerCase().contains(lower)) {
-                return true;
-            }
-        }
-        return false;
+    // 写入的VIP字段
+    private static final Map<String, Object> VIP_VALUES = new HashMap<>();
+    static {
+        // Boolean类
+        VIP_VALUES.put("is_vip", true);
+        VIP_VALUES.put("isVip", true);
+        VIP_VALUES.put("vip", true);
+        VIP_VALUES.put("vip_status", true);
+        VIP_VALUES.put("vipStatus", true);
+        VIP_VALUES.put("is_member", true);
+        VIP_VALUES.put("isMember", true);
+        VIP_VALUES.put("is_premium", true);
+        VIP_VALUES.put("isPremium", true);
+        VIP_VALUES.put("premium", true);
+        VIP_VALUES.put("has_subscription", true);
+        VIP_VALUES.put("hasSubscription", true);
+        VIP_VALUES.put("paid", true);
+        VIP_VALUES.put("is_paid", true);
+        VIP_VALUES.put("isLogin", true);
+        VIP_VALUES.put("is_login", true);
+        VIP_VALUES.put("login_status", true);
+        VIP_VALUES.put("loginStatus", true);
+
+        // String类
+        VIP_VALUES.put("vip_type", "permanent");
+        VIP_VALUES.put("vipType", "permanent");
+        VIP_VALUES.put("vip_level", "ultimate");
+        VIP_VALUES.put("vipLevel", "ultimate");
+        VIP_VALUES.put("member_type", "vip");
+        VIP_VALUES.put("memberType", "vip");
+        VIP_VALUES.put("user_level", "vip");
+        VIP_VALUES.put("userLevel", "vip");
+        VIP_VALUES.put("subscription_type", "permanent");
+        VIP_VALUES.put("subscriptionType", "permanent");
+
+        // Int类
+        VIP_VALUES.put("vip_expire", Integer.MAX_VALUE);
+        VIP_VALUES.put("vipExpire", Integer.MAX_VALUE);
+        VIP_VALUES.put("expire_time", Integer.MAX_VALUE);
+        VIP_VALUES.put("expireTime", Integer.MAX_VALUE);
+        VIP_VALUES.put("login_type", 1);
+        VIP_VALUES.put("loginType", 1);
     }
 
-    // ============================================================
-    // 根据value类型，返回"已开通VIP"对应的值
-    // ============================================================
-    private static Object getVipValue(Class<?> returnType, Object originalValue) {
-        if (returnType == boolean.class || returnType == Boolean.class) {
-            return true;
-        } else if (returnType == int.class || returnType == Integer.class) {
-            return 1;
-        } else if (returnType == long.class || returnType == Long.class) {
-            return 1L;
-        } else if (returnType == float.class || returnType == Float.class) {
-            return 1.0f;
-        } else if (returnType == String.class) {
-            return "vip";
-        } else {
-            return originalValue;
-        }
-    }
+    private static Context appContext = null;
+    private static boolean hasInjected = false;
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
-        // 只处理目标应用
         if (!lpparam.packageName.equals(TARGET_PACKAGE)) {
             return;
         }
@@ -108,196 +101,117 @@ public class MainHook implements IXposedHookLoadPackage {
         Log.i(TAG, "目标包名: " + lpparam.packageName);
         Log.i(TAG, "========================================");
 
-        try {
-            // ============================================
-            // Hook 1: SharedPreferencesImpl 所有读取方法
-            // ============================================
-            Class<?> spImplClass = XposedHelpers.findClass(
-                    "android.app.SharedPreferencesImpl",
-                    lpparam.classLoader
-            );
-
-            // --- getBoolean ---
-            XposedHelpers.findAndHookMethod(spImplClass, "getBoolean",
-                    String.class, boolean.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            String key = (String) param.args[0];
-                            if (isVipKey(key)) {
-                                Log.i(TAG, ">>> getBoolean(\"" + key + "\") -> true (注入)");
-                                param.setResult(true);
-                            }
+        // Hook Application.attachBaseContext - app最早期的生命周期，能拿到app的dataDir
+        XposedHelpers.findAndHookMethod(
+                "android.app.Application",
+                lpparam.classLoader,
+                "attachBaseContext",
+                Context.class,
+                new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        try {
+                            appContext = (Context) param.args[0];
+                            Log.i(TAG, "已捕获Context: " + appContext.getPackageName());
+                            injectVip();
+                        } catch (Throwable t) {
+                            Log.e(TAG, "attachBaseContext 注入失败: " + t.getMessage(), t);
                         }
+                    }
+                }
+        );
 
+        // Hook MainActivity.onCreate - 避免Flutter界面显示时还没注入
+        // 通过反射查找所有的 Activity onCreate
+        // 因为包名是 com.example.af_flutter_ceshi，MainActivity 一般是 MainActivity
+        try {
+            XposedHelpers.findAndHookMethod(
+                    "android.app.Activity",
+                    lpparam.classLoader,
+                    "onCreate",
+                    android.os.Bundle.class,
+                    new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
-                            if (!param.hasThrowable() && isVipKey((String) param.args[0])) {
-                                Log.i(TAG, ">>> getBoolean(\"" + param.args[0] + "\") = " + param.getResult());
-                            }
-                        }
-                    }
-            );
-
-            // --- getInt ---
-            XposedHelpers.findAndHookMethod(spImplClass, "getInt",
-                    String.class, int.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            String key = (String) param.args[0];
-                            if (isVipKey(key)) {
-                                Log.i(TAG, ">>> getInt(\"" + key + "\") -> 1 (注入)");
-                                param.setResult(1);
-                            }
-                        }
-                    }
-            );
-
-            // --- getString ---
-            XposedHelpers.findAndHookMethod(spImplClass, "getString",
-                    String.class, String.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            String key = (String) param.args[0];
-                            if (isVipKey(key)) {
-                                Log.i(TAG, ">>> getString(\"" + key + "\") -> \"vip\" (注入)");
-                                param.setResult("vip");
-                            }
-                        }
-                    }
-            );
-
-            // --- getLong ---
-            XposedHelpers.findAndHookMethod(spImplClass, "getLong",
-                    String.class, long.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            String key = (String) param.args[0];
-                            if (isVipKey(key)) {
-                                Log.i(TAG, ">>> getLong(\"" + key + "\") -> 1 (注入)");
-                                param.setResult(1L);
-                            }
-                        }
-                    }
-            );
-
-            Log.i(TAG, "SharedPreferences 读取Hook完成 ✓");
-
-            // ============================================
-            // Hook 2: SharedPreferences.Editor 写入操作
-            // 防止app将VIP状态设为false
-            // ============================================
-            try {
-                Class<?> editorImplClass = XposedHelpers.findClass(
-                        "android.app.SharedPreferencesImpl$EditorImpl",
-                        lpparam.classLoader
-                );
-
-                XposedHelpers.findAndHookMethod(editorImplClass, "putBoolean",
-                        String.class, boolean.class,
-                        new XC_MethodHook() {
-                            @Override
-                            protected void beforeHookedMethod(MethodHookParam param) {
-                                String key = (String) param.args[0];
-                                boolean value = (boolean) param.args[1];
-                                if (isVipKey(key) && !value) {
-                                    Log.i(TAG, ">>> Editor.putBoolean(\"" + key + "\", false) -> 拦截并改为true");
-                                    param.args[1] = true;
+                            try {
+                                // 首次进入任意Activity时注入
+                                if (!hasInjected && appContext != null) {
+                                    injectVip();
                                 }
+                            } catch (Throwable t) {
+                                Log.e(TAG, "onCreate 注入失败: " + t.getMessage());
                             }
                         }
-                );
+                    }
+            );
+            Log.i(TAG, "Activity.onCreate Hook 加载完成");
+        } catch (Throwable t) {
+            Log.w(TAG, "Activity.onCreate Hook 加载失败: " + t.getMessage());
+        }
+    }
 
-                XposedHelpers.findAndHookMethod(editorImplClass, "putString",
-                        String.class, String.class,
-                        new XC_MethodHook() {
-                            @Override
-                            protected void beforeHookedMethod(MethodHookParam param) {
-                                String key = (String) param.args[0];
-                                String value = (String) param.args[1];
-                                if (isVipKey(key)) {
-                                    Log.i(TAG, ">>> Editor.putString(\"" + key + "\", \"" + value + "\") -> 改为\"vip\"");
-                                    param.args[1] = "vip";
-                                }
-                            }
+    /**
+     * 注入VIP状态
+     * 直接写SharedPreferences文件，避开方法Hook可能引起的ANR
+     */
+    private static void injectVip() {
+        if (appContext == null) {
+            Log.e(TAG, "appContext为空，无法注入");
+            return;
+        }
+        if (hasInjected) {
+            return;
+        }
+        hasInjected = true;
+
+        try {
+            // 关键：使用MODE_PRIVATE重新打开每个已知的SharedPreferences文件
+            // 这会强制加载（如果存在）并创建（如果不存在）
+            for (String prefFileName : PREF_FILES) {
+                try {
+                    SharedPreferences sp = appContext.getSharedPreferences(
+                            prefFileName, Context.MODE_PRIVATE);
+                    SharedPreferences.Editor editor = sp.edit();
+
+                    // 先读取一次（触发实际加载）
+                    Map<String, ?> existing = sp.getAll();
+                    Log.i(TAG, "[" + prefFileName + "] 现有key数量: " + existing.size());
+                    if (existing.size() > 0) {
+                        Log.i(TAG, "[" + prefFileName + "] 现有keys: " + existing.keySet());
+                    }
+
+                    // 写入所有VIP字段
+                    for (Map.Entry<String, Object> entry : VIP_VALUES.entrySet()) {
+                        String key = entry.getKey();
+                        Object value = entry.getValue();
+                        if (value instanceof Boolean) {
+                            editor.putBoolean(key, (Boolean) value);
+                        } else if (value instanceof Integer) {
+                            editor.putInt(key, (Integer) value);
+                        } else if (value instanceof Long) {
+                            editor.putLong(key, (Long) value);
+                        } else if (value instanceof Float) {
+                            editor.putFloat(key, (Float) value);
+                        } else if (value instanceof String) {
+                            editor.putString(key, (String) value);
                         }
-                );
+                    }
 
-                // Editor.apply() 和 commit() 执行后再次强制写入VIP状态
-                XposedHelpers.findAndHookMethod(editorImplClass, "apply",
-                        new XC_MethodHook() {
-                            @Override
-                            protected void afterHookedMethod(MethodHookParam param) {
-                                // apply()后不需要额外操作，put阶段已拦截
-                            }
-                        }
-                );
+                    // 提交
+                    boolean ok = editor.commit();
+                    Log.i(TAG, "[" + prefFileName + "] VIP写入: " + (ok ? "成功 ✓" : "失败 ✗"));
 
-                XposedHelpers.findAndHookMethod(editorImplClass, "commit",
-                        new XC_MethodHook() {
-                            @Override
-                            protected void afterHookedMethod(MethodHookParam param) {
-                                // 同上
-                            }
-                        }
-                );
-
-                Log.i(TAG, "SharedPreferences 写入拦截完成 ✓");
-            } catch (XposedHelpers.ClassNotFoundError e) {
-                Log.w(TAG, "EditorImpl hook失败 (非关键): " + e.getMessage());
-            }
-
-            // ============================================
-            // Hook 3: (可选) Flutter MethodChannel
-            // 如果SharedPreferences层Hook已经生效，此层作为兜底
-            // ============================================
-            try {
-                Class<?> methodChannelClass = XposedHelpers.findClass(
-                        "io.flutter.plugin.common.MethodChannel",
-                        lpparam.classLoader
-                );
-
-                XposedHelpers.findAndHookMethod(methodChannelClass, "invokeMethod",
-                        String.class, Object.class,
-                        XposedHelpers.findClass("io.flutter.plugin.common.MethodChannel$Result", lpparam.classLoader),
-                        new XC_MethodHook() {
-                            @Override
-                            protected void beforeHookedMethod(MethodHookParam param) {
-                                String method = (String) param.args[0];
-                                Object args = param.args[1];
-
-                                // 只处理shared_preferences相关的调用
-                                if (method != null && method.startsWith("get")) {
-                                    // 尝试从args中提取key
-                                    if (args != null) {
-                                        String argsStr = args.toString();
-                                        for (String vipKey : VIP_KEYS) {
-                                            if (argsStr.toLowerCase().contains(vipKey.toLowerCase())) {
-                                                Log.i(TAG, ">>> MethodChannel." + method + " args包含VIP key: " + argsStr);
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                );
-
-                Log.i(TAG, "Flutter MethodChannel Hook完成 ✓");
-            } catch (XposedHelpers.ClassNotFoundError e) {
-                Log.i(TAG, "MethodChannel未找到 (Flutter可能使用不同版本): " + e.getMessage());
+                } catch (Throwable t) {
+                    Log.w(TAG, "[" + prefFileName + "] 注入出错: " + t.getMessage());
+                }
             }
 
             Log.i(TAG, "========================================");
-            Log.i(TAG, "全部Hook加载完成！VIP已永久解锁");
+            Log.i(TAG, "VIP状态注入完成！请打开APP测试");
             Log.i(TAG, "========================================");
 
-        } catch (Exception e) {
-            Log.e(TAG, "Hook加载失败: " + e.getMessage(), e);
-            XposedBridge.log(TAG + " Hook加载失败: " + e);
+        } catch (Throwable t) {
+            Log.e(TAG, "注入过程异常: " + t.getMessage(), t);
         }
     }
 }
